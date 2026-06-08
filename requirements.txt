@@ -1,0 +1,15 @@
+# ComfyUI Vision Models - Python dependencies
+#
+# Install with:
+#   pip install -r requirements.txt
+#
+# For video support with MiniCPM-V:
+#   pip install torchcodec          # if CUDA >= 13.1
+#   pip install av                  # alternative (any CUDA)
+
+# Core
+#transformers>=5.7.0
+
+# Optional but recommended
+# flash-attn>=2.0.0    # for use_flash_attention_2=True (compile from source)
+# sentencepiece        # some tokenizers need it
