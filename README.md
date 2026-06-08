@@ -34,7 +34,7 @@ A ComfyUI custom node package for running state-of-the-art open-source vision-la
    pip install "transformers>=4.57.0"
    ```
 
-4. **MiniCPM-V only** — requires `transformers>=5.7.0`:
+4. **MiniCPM-V & LFM2.5-VL** — requires `transformers>=5.7.0`:
    ```bash
    pip install "transformers[torch]>=5.7.0" torchvision
    # optionally for video:
@@ -153,6 +153,7 @@ For Step3-VL on consumer hardware, use the FP8 quantized checkpoint: `stepfun-ai
 ## Model-Specific Notes
 
 ### LFM2.5-VL
+- Requires `transformers>=5.7.0` (for `Lfm2VlProcessor` and `TokenizersBackend`).
 - Standard `AutoModelForImageTextToText` / `apply_chat_template` pattern.
 - No `trust_remote_code` needed.
 

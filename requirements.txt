@@ -8,7 +8,7 @@
 #   pip install av                  # alternative (any CUDA)
 
 # Core
-#transformers>=5.7.0
+transformers>=5.7.0
 
 # Optional but recommended
 # flash-attn>=2.0.0    # for use_flash_attention_2=True (compile from source)

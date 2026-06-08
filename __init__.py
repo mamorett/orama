@@ -2,6 +2,11 @@
 ComfyUI Vision Models - Custom nodes for LFM2.5-VL, Step3-VL, and MiniCPM-V models
 """
 
+# Patch transformers Lfm2VlImageProcessor / Lfm2VlImageProcessorFast naming mismatch
+import transformers
+if not hasattr(transformers, "Lfm2VlImageProcessorFast") and hasattr(transformers, "Lfm2VlImageProcessor"):
+    transformers.Lfm2VlImageProcessorFast = transformers.Lfm2VlImageProcessor
+
 from .nodes.lfm2_vl_node import LFM25VLNode, LFM25VLModelLoader
 from .nodes.step3_vl_node import Step3VLNode, Step3VLModelLoader
 from .nodes.minicpm_v_node import MiniCPMVNode, MiniCPMVModelLoader

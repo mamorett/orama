@@ -103,8 +103,73 @@ class Step3VLModelLoader:
         if use_flash_attention_2:
             load_kwargs["attn_implementation"] = "flash_attention_2"
 
-        processor = AutoProcessor.from_pretrained(local_path, trust_remote_code=True)
-        model = AutoModelForCausalLM.from_pretrained(local_path, **load_kwargs).eval()
+        import sys
+        # Temporarily add model path to sys.path so transformers check_imports doesn't complain about local files
+        sys.path.insert(0, local_path)
+        try:
+            processor = AutoProcessor.from_pretrained(local_path, trust_remote_code=True)
+            model = AutoModelForCausalLM.from_pretrained(local_path, **load_kwargs).eval()
+            
+            # Clean override for prepare_inputs_for_generation using super() delegation
+            import types
+            def clean_prepare_inputs(self, input_ids, past_key_values=None, inputs_embeds=None, pixel_values=None, attention_mask=None, cache_position=None, logits_to_keep=None, **kwargs):
+                # Call PreTrainedModel's prepare_inputs_for_generation to bypass the model's buggy override
+                model_inputs = super(model.__class__, self).prepare_inputs_for_generation(
+                    input_ids,
+                    past_key_values=past_key_values,
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask,
+                    cache_position=cache_position,
+                    logits_to_keep=logits_to_keep,
+                    **kwargs
+                )
+                
+                # Detect if we are in the prefill stage using past_key_values
+                is_prefill = True
+                if past_key_values is not None:
+                    if hasattr(past_key_values, "get_seq_length"):
+                        is_prefill = (past_key_values.get_seq_length() == 0)
+                    elif len(past_key_values) > 0:
+                        is_prefill = False
+                        
+                if is_prefill:
+                    # In prefill, we must forward pixel_values
+                    model_inputs["pixel_values"] = pixel_values
+                else:
+                    # In decoding, clear all image/multimodal keys to prevent reprocessing
+                    model_inputs.pop("pixel_values", None)
+                    model_inputs.pop("patch_pixel_values", None)
+                    model_inputs.pop("num_patches", None)
+                    model_inputs.pop("patch_newline_mask", None)
+                    
+                return model_inputs
+
+            model.prepare_inputs_for_generation = types.MethodType(clean_prepare_inputs, model)
+            
+            # Patch model's forward to return past_key_values (resolves original model's KV cache bug)
+            # Patch model's forward to return past_key_values (resolves original model's KV cache bug)
+            import functools
+            original_model_forward = model.model.forward
+            @functools.wraps(original_model_forward)
+            def patched_model_forward(*args, **kwargs):
+                res = original_model_forward(*args, **kwargs)
+                model._last_past_key_values = res.past_key_values if hasattr(res, "past_key_values") else None
+                return res
+            model.model.forward = patched_model_forward
+            
+            original_lm_forward = model.forward
+            @functools.wraps(original_lm_forward)
+            def patched_lm_forward(*args, **kwargs):
+                res = original_lm_forward(*args, **kwargs)
+                if hasattr(res, "past_key_values"):
+                    res.past_key_values = getattr(model, "_last_past_key_values", None)
+                return res
+            model.forward = patched_lm_forward
+
+            model._orama_patched_v5 = True
+        finally:
+            if local_path in sys.path:
+                sys.path.remove(local_path)
 
         set_cached_model(cache_key, model, processor)
         print(f"[Step3-VL] Model loaded.")
@@ -191,8 +256,10 @@ class Step3VLNode:
         pil_image = comfy_image_to_pil(image)
 
         messages = []
-        if system_prompt.strip():
-            messages.append({"role": "system", "content": system_prompt.strip()})
+        sys_prompt = system_prompt.strip()
+        if not sys_prompt:
+            sys_prompt = "Please respond directly in English. Do not output any reasoning or thinking steps."
+        messages.append({"role": "system", "content": sys_prompt})
         messages.append({
             "role": "user",
             "content": [
@@ -201,17 +268,91 @@ class Step3VLNode:
             ],
         })
 
+        # Retrieve the processor's chat template and dynamically remove the <think> suffix if present in memory
+        chat_template = getattr(processor, "chat_template", None)
+        if chat_template is None and hasattr(processor, "tokenizer"):
+            chat_template = getattr(processor.tokenizer, "chat_template", None)
+        
+        if chat_template:
+            if "<think>\\n" in chat_template:
+                chat_template = chat_template.replace("<think>\\n", "")
+            elif "<think>\n" in chat_template:
+                chat_template = chat_template.replace("<think>\n", "")
+
         inputs = processor.apply_chat_template(
             messages,
             add_generation_prompt=True,
             tokenize=True,
             return_dict=True,
             return_tensors="pt",
+            chat_template=chat_template,
         ).to(mdl.device)
 
         gen_kwargs = build_generation_kwargs(
             max_new_tokens, temperature, top_k, top_p, repetition_penalty, do_sample
         )
+        # Fix misconfigured eos_token_id in model config to avoid infinite generation loops
+        eos_ids = [151643]
+        if hasattr(processor, "tokenizer") and hasattr(processor.tokenizer, "eos_token_id"):
+            eos_ids.append(processor.tokenizer.eos_token_id)
+        gen_kwargs["eos_token_id"] = list(set([int(x) for x in eos_ids if x is not None]))
+
+        # Apply clean override to prepare_inputs_for_generation if not already patched
+        if not getattr(mdl, "_orama_patched_v5", False):
+            import types
+            def clean_prepare_inputs(self, input_ids, past_key_values=None, inputs_embeds=None, pixel_values=None, attention_mask=None, cache_position=None, logits_to_keep=None, **kwargs):
+                model_inputs = super(mdl.__class__, self).prepare_inputs_for_generation(
+                    input_ids,
+                    past_key_values=past_key_values,
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask,
+                    cache_position=cache_position,
+                    logits_to_keep=logits_to_keep,
+                    **kwargs
+                )
+                
+                # Detect if we are in the prefill stage using past_key_values
+                is_prefill = True
+                if past_key_values is not None:
+                    if hasattr(past_key_values, "get_seq_length"):
+                        is_prefill = (past_key_values.get_seq_length() == 0)
+                    elif len(past_key_values) > 0:
+                        is_prefill = False
+                        
+                if is_prefill:
+                    # In prefill, we must forward pixel_values
+                    model_inputs["pixel_values"] = pixel_values
+                else:
+                    # In decoding, clear all image/multimodal keys to prevent reprocessing
+                    model_inputs.pop("pixel_values", None)
+                    model_inputs.pop("patch_pixel_values", None)
+                    model_inputs.pop("num_patches", None)
+                    model_inputs.pop("patch_newline_mask", None)
+                    
+                return model_inputs
+
+            mdl.prepare_inputs_for_generation = types.MethodType(clean_prepare_inputs, mdl)
+            
+            # Patch model's forward to return past_key_values (resolves original model's KV cache bug)
+            import functools
+            original_model_forward = mdl.model.forward
+            @functools.wraps(original_model_forward)
+            def patched_model_forward(*args, **kwargs):
+                res = original_model_forward(*args, **kwargs)
+                mdl._last_past_key_values = res.past_key_values if hasattr(res, "past_key_values") else None
+                return res
+            mdl.model.forward = patched_model_forward
+            
+            original_lm_forward = mdl.forward
+            @functools.wraps(original_lm_forward)
+            def patched_lm_forward(*args, **kwargs):
+                res = original_lm_forward(*args, **kwargs)
+                if hasattr(res, "past_key_values"):
+                    res.past_key_values = getattr(mdl, "_last_past_key_values", None)
+                return res
+            mdl.forward = patched_lm_forward
+
+            mdl._orama_patched_v5 = True
 
         with torch.no_grad():
             output_ids = mdl.generate(**inputs, **gen_kwargs)
